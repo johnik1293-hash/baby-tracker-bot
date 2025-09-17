@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: baby-tracker-web
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn app.web.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: WEBAPP_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+
+  - type: worker
+    name: baby-tracker-bot
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python -m app.bot.main"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
