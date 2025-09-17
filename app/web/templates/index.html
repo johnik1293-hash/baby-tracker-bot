@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{{ app_title }}</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <!-- Telegram WebApp SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>Baby Tracker — Mini App</h1>
+    <p class="hint">Эта страница открыта внутри Telegram (WebApp). Действия ниже отправят данные боту.</p>
+
+    <div class="card">
+      <h2>Сон</h2>
+      <button id="sleepStart">Начал спать</button>
+      <button id="sleepEnd">Проснулся</button>
+    </div>
+
+    <div class="card">
+      <h2>Кормление (быстрый выбор)</h2>
+      <div class="row">
+        <button data-type="formula" data-amount="90">Смесь 90 мл</button>
+        <button data-type="formula" data-amount="120">Смесь 120 мл</button>
+        <button data-type="formula" data-amount="150">Смесь 150 мл</button>
+      </div>
+      <div class="row">
+        <button data-type="water" data-amount="30">Вода 30 мл</button>
+        <button data-type="water" data-amount="60">Вода 60 мл</button>
+        <button data-type="water" data-amount="90">Вода 90 мл</button>
+      </div>
+      <div class="row">
+        <button data-type="solid" data-amount="40">Прикорм 40 г</button>
+        <button data-type="solid" data-amount="60">Прикорм 60 г</button>
+        <button data-type="solid" data-amount="80">Прикорм 80 г</button>
+      </div>
+      <div class="row">
+        <button data-type="breast">Грудное молоко (фиксация)</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Проверка связи</h2>
+      <button id="sendPing">Отправить тест</button>
+      <div id="status" class="status"></div>
+    </div>
+  </div>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.expand(); // разворачиваем на весь экран
+      tg.MainButton.setText("Закрыть").show().onClick(() => tg.close());
+      // применяем тему (светлая/тёмная)
+      document.documentElement.setAttribute("data-theme", tg.colorScheme || "light");
+    }
+
+    function sendData(payload) {
+      const dataStr = JSON.stringify(payload);
+      if (tg && tg.sendData) {
+        tg.sendData(dataStr); // отправка в бота → message.web_app_data
+        showStatus("Отправлено боту: " + dataStr);
+      } else {
+        showStatus("Ошибка: WebApp SDK недоступен");
+      }
+    }
+
+    function showStatus(text) {
+      const el = document.getElementById("status");
+      el.textContent = text;
+    }
+
+    // Сон
+    document.getElementById("sleepStart").addEventListener("click", () => {
+      sendData({ type: "sleep_start" });
+    });
+    document.getElementById("sleepEnd").addEventListener("click", () => {
+      sendData({ type: "sleep_end" });
+    });
+
+    // Кормление
+    document.querySelectorAll("[data-type]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const t = btn.getAttribute("data-type");
+        const amount = btn.getAttribute("data-amount");
+        const payload = { type: "feeding", feeding_type: t };
+        if (amount) {
+          const val = parseInt(amount, 10);
+          if (t === "solid") payload.amount_g = val; else payload.amount_ml = val;
+        }
+        sendData(payload);
+      });
+    });
+
+    // Тест
+    document.getElementById("sendPing").addEventListener("click", () => {
+      sendData({ type: "ping", message: "Привет от WebApp" });
+    });
+  </script>
+</body>
+</html>
