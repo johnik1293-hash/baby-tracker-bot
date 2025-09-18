@@ -11,3 +11,4 @@ __pycache__/
 *.sqlite*
 *.log
 *.png
+cloudflared.exe
