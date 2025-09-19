@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import AsyncIterator
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -11,24 +11,50 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-# 1) Читаем DATABASE_URL из окружения
+
+def _normalize_db_url(url: str) -> str:
+    """
+    Приводим URL Postgres к async-драйверу:
+      postgres://...      -> postgresql+asyncpg://...
+      postgresql://...    -> postgresql+asyncpg://...
+    SQLite оставляем как есть.
+    """
+    if not url:
+        return ""
+
+    low = url.lower()
+    if low.startswith("postgres://"):
+        return "postgresql+asyncpg://" + url.split("://", 1)[1]
+    if low.startswith("postgresql://") and "+asyncpg" not in low:
+        return "postgresql+asyncpg://" + url.split("://", 1)[1]
+    return url
+
+
+# 1) Читаем DATABASE_URL
 DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
 
-# Если переменная не задана — используем локальный SQLite (для Render тоже ок, но данные не сохранятся между деплоями)
+# Если не задан — используем локальный SQLite (для Render данные при билд/перезапусках не сохраняются)
 if not DATABASE_URL:
-    # Файл БД будет в папке проекта (можешь поменять путь)
     DATABASE_URL = "sqlite+aiosqlite:///./data.db"
 
+# Принудительно переводим Postgres в asyncpg
+DATABASE_URL = _normalize_db_url(DATABASE_URL)
+
 # 2) Создаём async engine
-#    Для SQLite дополнительных connect_args не нужно (aiosqlite их игнорирует)
 async_engine: AsyncEngine = create_async_engine(
     DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
 )
 
-# 3) Фабрика сессий
+# 3) Фабрика асинхронных сессий
 AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     bind=async_engine,
     expire_on_commit=False,
 )
+
+
+# 4) Зависимость/утилита для FastAPI-хендлеров
+async def get_session() -> AsyncIterator[AsyncSession]:
+    async with AsyncSessionLocal() as session:
+        yield session
