@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.db.models import Base
+
 
 def _normalize_db_url(url: str) -> str:
     """
@@ -33,9 +35,9 @@ def _normalize_db_url(url: str) -> str:
 # 1) Читаем DATABASE_URL
 DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
 
-# Если не задан — используем локальный SQLite (для Render данные при билд/перезапусках не сохраняются)
+# Если не задан — используем локальный SQLite (файл рядом с проектом)
 if not DATABASE_URL:
-    DATABASE_URL = "sqlite+aiosqlite:///./data.db"
+    DATABASE_URL = "sqlite+aiosqlite:///./baby_tracker.db"
 
 # Принудительно переводим Postgres в asyncpg
 DATABASE_URL = _normalize_db_url(DATABASE_URL)
@@ -54,7 +56,14 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
 )
 
 
-# 4) Зависимость/утилита для FastAPI-хендлеров
+# 4) DI-зависимость/утилита для FastAPI/хендлеров
 async def get_session() -> AsyncIterator[AsyncSession]:
     async with AsyncSessionLocal() as session:
         yield session
+
+
+# 5) Инициализация схемы БД (создание таблиц)
+async def init_db() -> None:
+    """Создать все таблицы по моделям (idempotent)."""
+    async with async_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
