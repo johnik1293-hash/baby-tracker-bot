@@ -153,3 +153,77 @@ class Reminder(Base):
 
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+# --- Семья, участники, инвайты, журнал событий (календарь) ---
+
+from uuid import uuid4
+from sqlalchemy import UniqueConstraint, Text, Boolean
+
+class Family(Base):
+    __tablename__ = "families"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    members: Mapped[list["FamilyMember"]] = relationship(
+        back_populates="family",
+        cascade="all, delete-orphan",
+    )
+    invites: Mapped[list["FamilyInvite"]] = relationship(
+        back_populates="family",
+        cascade="all, delete-orphan",
+    )
+
+
+class FamilyMember(Base):
+    __tablename__ = "family_members"
+    __table_args__ = (
+        UniqueConstraint("family_id", "user_id", name="uq_family_user"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    family_id: Mapped[int] = mapped_column(ForeignKey("families.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+    # role: 'owner' | 'parent' | 'nanny'
+    role: Mapped[str] = mapped_column(String(20), default="parent")
+
+    family: Mapped["Family"] = relationship(back_populates="members")
+
+
+class FamilyInvite(Base):
+    __tablename__ = "family_invites"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_invite_code"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    family_id: Mapped[int] = mapped_column(ForeignKey("families.id", ondelete="CASCADE"), index=True)
+    code: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    family: Mapped["Family"] = relationship(back_populates="invites")
+
+
+class CareEvent(Base):
+    """
+    Унифицированное событие для календаря семьи: кто/что/когда/для какого ребёнка.
+    type: 'sleep_start' | 'sleep_end' | 'feeding' | 'bath' | 'medicine' | ...
+    details: произвольный текст (например: 'formula 120 ml' или 'сон 45 мин')
+    """
+    __tablename__ = "care_events"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+
+    family_id: Mapped[int | None] = mapped_column(ForeignKey("families.id", ondelete="SET NULL"), index=True, nullable=True)
+    baby_id: Mapped[int | None] = mapped_column(ForeignKey("babies.id", ondelete="SET NULL"), index=True, nullable=True)
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True)
+
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    type: Mapped[str] = mapped_column(String(32))
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # связи (по желанию)
+    # family: relationship("Family")
+    # baby: relationship("Baby")
