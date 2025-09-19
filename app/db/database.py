@@ -1,23 +1,34 @@
+# app/db/database.py
 from __future__ import annotations
-from typing import AsyncGenerator
 
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase
+import os
+from typing import Optional
 
-# По умолчанию — локальная SQLite в файле data.db
-DATABASE_URL = "sqlite+aiosqlite:///data.db"
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
-class Base(DeclarativeBase):
-    pass
+# 1) Читаем DATABASE_URL из окружения
+DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
 
-engine = create_async_engine(DATABASE_URL, echo=False, future=True)
-SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+# Если переменная не задана — используем локальный SQLite (для Render тоже ок, но данные не сохранятся между деплоями)
+if not DATABASE_URL:
+    # Файл БД будет в папке проекта (можешь поменять путь)
+    DATABASE_URL = "sqlite+aiosqlite:///./data.db"
 
-async def init_db() -> None:
-    """Создаёт таблицы при старте бота (без миграций)."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+# 2) Создаём async engine
+#    Для SQLite дополнительных connect_args не нужно (aiosqlite их игнорирует)
+async_engine: AsyncEngine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,
+)
 
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    async with SessionLocal() as session:
-        yield session
+# 3) Фабрика сессий
+AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
+    bind=async_engine,
+    expire_on_commit=False,
+)
