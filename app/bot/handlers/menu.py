@@ -1,78 +1,92 @@
+from __future__ import annotations
+
+import os
 from aiogram import Router, F, types
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+
 from app.bot.keyboards.common import main_menu_kb
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from app.bot.handlers.family import family_menu
+from app.bot.handlers.calendar import calendar_last
 
 router = Router(name="menu")
 
+# Тексты кнопок (точно как в клавиатуре)
+BTN_SLEEP = "🛌 Сон"
+BTN_FEED = "🍼 Кормление"
+BTN_FAMILY = "👨‍👩‍👧 Семья"
+BTN_CALENDAR = "📅 Календарь"
+BTN_SETTINGS = "⚙️ Настройки"
+BTN_MAIN = "Главное меню"
 
-@router.message(F.text == "Сон")
+# --- Раздел «Сон» ---
+@router.message(F.text.in_({BTN_SLEEP, "Сон"}))
 async def section_sleep(message: types.Message):
     kb = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Начал спать"), KeyboardButton(text="Проснулся")],
-            [KeyboardButton(text="Статистика сна"), KeyboardButton(text="Главное меню")],
+            [KeyboardButton(text="Статистика сна"), KeyboardButton(text=BTN_MAIN)],
         ],
         resize_keyboard=True,
     )
     await message.answer("Трекер сна.\nВыбери действие:", reply_markup=kb)
 
-
-@router.message(F.text == "Кормление")
+# --- Раздел «Кормление» ---
+@router.message(F.text.in_({BTN_FEED, "Кормление"}))
 async def section_feeding(message: types.Message):
     kb = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Грудное молоко"), KeyboardButton(text="Смесь")],
             [KeyboardButton(text="Прикорм"), KeyboardButton(text="Вода")],
-            [KeyboardButton(text="Статистика кормления"), KeyboardButton(text="Главное меню")],
+            [KeyboardButton(text="Статистика кормления"), KeyboardButton(text=BTN_MAIN)],
         ],
         resize_keyboard=True,
     )
     await message.answer("Трекер кормления.\nВыбери действие:", reply_markup=kb)
 
-
-@router.message(F.text == "Здоровье")
+# --- Раздел «Здоровье» (если используешь) ---
+@router.message(F.text.in_({"Здоровье"}))
 async def section_health(message: types.Message):
     kb = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Температура"), KeyboardButton(text="Лекарства")],
             [KeyboardButton(text="Визит к врачу"), KeyboardButton(text="Рост/Вес")],
-            [KeyboardButton(text="Статистика здоровья"), KeyboardButton(text="Главное меню")],
+            [KeyboardButton(text="Статистика здоровья"), KeyboardButton(text=BTN_MAIN)],
         ],
         resize_keyboard=True,
     )
     await message.answer("Дневник здоровья.\nВыбери действие:", reply_markup=kb)
 
+# --- Календарь (семейный журнал) ---
+@router.message(F.text.in_({BTN_CALENDAR, "Календарь"}))
+async def open_calendar_via_button(message: types.Message):
+    await calendar_last(message)
 
-@router.message(F.text == "Статистика")
-async def section_stats(message: types.Message):
-    kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [
-            types.InlineKeyboardButton(text="Сон: 7 дней", callback_data="stats_sleep_7d"),
-            types.InlineKeyboardButton(text="Кормление: 7 дней", callback_data="stats_feed_7d"),
-        ],
-    ])
-    await message.answer("Выбери график:", reply_markup=kb)
+# --- Семья (создать/присоединиться) ---
+@router.message(F.text.in_({BTN_FAMILY, "Семья"}))
+async def open_family_via_button(message: types.Message):
+    await family_menu(message)
 
+# --- Настройки (если используешь отдельный раздел) ---
+@router.message(F.text.in_({BTN_SETTINGS, "Настройки"}))
+async def section_settings(message: types.Message):
+    await message.answer("Здесь будут настройки напоминаний и уведомлений. ⚙️")
 
-@router.message(F.text == "Помощь")
-async def section_help(message: types.Message):
-    await message.answer("Напиши /help для списка команд.")
-
-
-@router.message(F.text == "Главное меню")
+# --- Кнопка «Главное меню» ---
+@router.message(F.text == BTN_MAIN)
 async def back_to_main(message: types.Message):
     await message.answer("Главное меню. Выбери раздел:", reply_markup=main_menu_kb())
-from app.bot.keyboards.common import main_menu_kb, webapp_open_kb
 
-import os
-from aiogram import Router, F, types
-from app.bot.keyboards.common import main_menu_kb, webapp_open_kb
-
+# --- (опционально) Мини-приложение, если у тебя есть кнопка «Мини-приложение» ---
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+
+def webapp_open_kb(url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Открыть мини-приложение", web_app=WebAppInfo(url=url))
+    ]])
 
 @router.message(F.text == "Мини-приложение")
 async def open_mini_app(message: types.Message):
     if not WEBAPP_URL or not WEBAPP_URL.startswith("https://"):
-        await message.answer("⚠️ WebApp URL не задан или не HTTPS. Укажи WEBAPP_URL в .env")
+        await message.answer("⚠️ WebApp URL не задан или не HTTPS. Укажи переменную окружения WEBAPP_URL.")
         return
     await message.answer("Открой мини-приложение 👇", reply_markup=webapp_open_kb(WEBAPP_URL))

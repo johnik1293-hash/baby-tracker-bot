@@ -14,12 +14,14 @@ from app.bot.handlers.sleep import router as sleep_router
 from app.bot.handlers.feeding import router as feeding_router
 from app.bot.handlers.health import router as health_router
 from app.bot.handlers.stats import router as stats_router
+from app.bot.handlers.family import router as family_router
+from app.bot.handlers.calendar import router as calendar_router
 
 def build_dispatcher() -> Dispatcher:
     from aiogram.fsm.storage.memory import MemoryStorage
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Порядок важен: reminders раньше menu
+    # Порядок: start/help → reminders/menu → доменные разделы → family/calendar
     dp.include_router(start_router)
     dp.include_router(help_router)
     dp.include_router(reminders_router)
@@ -28,6 +30,8 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(feeding_router)
     dp.include_router(health_router)
     dp.include_router(stats_router)
+    dp.include_router(family_router)
+    dp.include_router(calendar_router)
     return dp
 
 def build_bot(token: str) -> Bot:
