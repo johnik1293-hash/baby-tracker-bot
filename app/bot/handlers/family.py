@@ -96,7 +96,8 @@ async def fam_create(cb: types.CallbackQuery):
             await family_menu(cb.message)
             return
 
-        fam = Family(name=f"Семья {user.first_name or user.username or user.telegram_id}")
+        # В модели Family нет поля 'name' — создаём без него
+        fam = Family()
         session.add(fam)
         await session.flush()
 
