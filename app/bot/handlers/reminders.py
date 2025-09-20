@@ -4,7 +4,6 @@ import os
 from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
-
 from sqlalchemy import select
 
 from app.bot.keyboards.common import main_menu_kb
@@ -13,7 +12,6 @@ from app.db.models import User
 
 router = Router()
 
-# Берём URL мини-приложения из переменной окружения (без зависимостей от app.core)
 WEB_BASE_URL = os.getenv("WEB_BASE_URL")
 
 
@@ -33,9 +31,11 @@ def _settings_kb() -> InlineKeyboardMarkup:
 
 
 async def _load_user(tg_id: int) -> User | None:
-    async with get_session() as session:
+    # ВАЖНО: get_session() — async-generator, поэтому используем async for
+    async for session in get_session():
         res = await session.execute(select(User).where(User.telegram_id == tg_id).limit(1))
         return res.scalar_one_or_none()
+    return None
 
 
 @router.message(Command("settings"))
@@ -50,7 +50,6 @@ async def settings_menu(message: types.Message) -> None:
 
 @router.callback_query(F.data == "rem:toggle")
 async def settings_toggle_reminders(callback: types.CallbackQuery) -> None:
-    # Здесь можно добавить реальное переключение флага в БД, если в модели есть поле.
     await callback.answer("Переключил состояние напоминаний")
     try:
         await callback.message.edit_text("⚙️ Настройки напоминаний и уведомлений.", reply_markup=_settings_kb())
@@ -60,7 +59,6 @@ async def settings_toggle_reminders(callback: types.CallbackQuery) -> None:
 
 @router.callback_query(F.data.in_({"back:main", "rem:back", "settings:back"}))
 async def cb_menu_back(callback: types.CallbackQuery) -> None:
-    # Возвращаемся в главное меню без импортов из menu.py
     await callback.answer()
     try:
         await callback.message.delete()
