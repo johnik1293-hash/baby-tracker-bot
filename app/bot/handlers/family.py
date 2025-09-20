@@ -52,11 +52,16 @@ async def _get_user_family(session: AsyncSession, user_id: int) -> Family | None
     return res.scalar_one_or_none()
 
 
+def _default_family_title(u: User) -> str:
+    who = u.first_name or u.username or str(u.telegram_id)
+    return f"Семья {who}"
+
+
 # ---------- entry ----------
 
 @router.message(F.text.in_({"👨‍👩‍👧 Семья", "Семья"}))
 async def family_menu(message: types.Message):
-    # ВАЖНО: берём сессию через async for, а не session = get_session()
+    # важно: берём сессию через async for
     async for session in get_session():
         user = await _get_or_create_user(session, message.from_user)
         fam = await _get_user_family(session, user.id)
@@ -68,7 +73,7 @@ async def family_menu(message: types.Message):
             )
             members = mem_q.scalars().all()
             text = (
-                f"🏠 Ваша семья: <b>{fam.name or 'Без названия'}</b>\n"
+                f"🏠 Ваша семья: <b>{fam.title}</b>\n"
                 f"Участников: <b>{len(members)}</b>\n\n"
                 "Выберите действие:"
             )
@@ -96,8 +101,8 @@ async def fam_create(cb: types.CallbackQuery):
             await family_menu(cb.message)
             return
 
-        # В модели Family нет поля 'name' — создаём без него
-        fam = Family()
+        # создаём семью с обязательным title
+        fam = Family(title=_default_family_title(user))
         session.add(fam)
         await session.flush()
 
@@ -126,7 +131,7 @@ async def fam_members(cb: types.CallbackQuery):
         )
         rows = mem_q.all()
 
-    lines = ["👥 <b>Участники семьи</b>:"]
+    lines = [f"👥 <b>Участники семьи «{fam.title}»</b>:"]
     for m, u in rows:
         who = u.first_name or u.username or str(u.telegram_id)
         role = m.role or "member"
@@ -194,7 +199,7 @@ async def fam_join_apply(message: types.Message):
         session.add(FamilyMember(family_id=fam.id, user_id=user.id, role="member"))
         await session.commit()
 
-    await message.answer(f"✅ Вы присоединились к семье: <b>{fam.name or fam.id}</b>")
+    await message.answer(f"✅ Вы присоединились к семье: <b>{fam.title}</b>")
     # покажем меню семьи
     await family_menu(message)
 
@@ -211,8 +216,7 @@ async def fam_leave(cb: types.CallbackQuery):
 
         # удаляем членство
         res = await session.execute(
-            select(FamilyMember)
-            .where(
+            select(FamilyMember).where(
                 FamilyMember.family_id == fam.id,
                 FamilyMember.user_id == user.id,
             )
