@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from aiogram import Router, F, types
+from aiogram.fsm.context import FSMContext  # <-- добавили
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo,
@@ -10,14 +11,14 @@ from aiogram.types import (
 from app.bot.keyboards.common import main_menu_kb
 from app.bot.handlers.family import family_menu
 from app.bot.handlers.calendar import calendar_last
-from app.bot.handlers.children import children_entry  # <-- добавлено
+from app.bot.handlers.children import children_entry  # <-- используем entry
 
 router = Router(name="menu")
 
 # Тексты кнопок (точно как в клавиатуре)
 BTN_SLEEP = "🛌 Сон"
 BTN_FEED = "🍼 Кормление"
-BTN_CHILD = "👶 Профиль ребёнка"   # <-- добавлено
+BTN_CHILD = "👶 Профиль ребёнка"
 BTN_FAMILY = "👨‍👩‍👧 Семья"
 BTN_CALENDAR = "📅 Календарь"
 BTN_SETTINGS = "⚙️ Настройки"
@@ -50,9 +51,8 @@ async def section_feeding(message: types.Message):
 
 # --- Профиль ребёнка ---
 @router.message(F.text.in_({BTN_CHILD, "Профиль ребёнка"}))
-async def open_children_via_button(message: types.Message):
-    # просто делегируем готовому entry-хендлеру children
-    await children_entry(message)
+async def open_children_via_button(message: types.Message, state: FSMContext):  # <-- принимаем state
+    await children_entry(message, state)  # <-- передаём state дальше
 
 # --- Раздел «Здоровье» (если используешь) ---
 @router.message(F.text.in_({"Здоровье"}))
