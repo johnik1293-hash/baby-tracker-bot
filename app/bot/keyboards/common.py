@@ -1,20 +1,15 @@
-from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton
-)
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text='Сон'), KeyboardButton(text='Кормление')],
-            [KeyboardButton(text='Здоровье'), KeyboardButton(text='Статистика')],
-            [KeyboardButton(text='Профиль ребёнка'), KeyboardButton(text='Настройки')],
-            [KeyboardButton(text='Помощь')],
-            [KeyboardButton(text='Мини-приложение')],
-
+            [KeyboardButton(text="🛌 Сон"), KeyboardButton(text="🍼 Кормление")],
+            [KeyboardButton(text="👶 Профиль ребёнка"), KeyboardButton(text="📅 Календарь")],
+            [KeyboardButton(text="👨‍👩‍👧 Семья"), KeyboardButton(text="⚙️ Настройки")],
         ],
         resize_keyboard=True,
     )
+
 
 def sleep_inline_quality_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -24,7 +19,6 @@ def sleep_inline_quality_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="Беспокойно 😕", callback_data="quality_bad"),
         ]
     ])
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 def webapp_open_kb(url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[

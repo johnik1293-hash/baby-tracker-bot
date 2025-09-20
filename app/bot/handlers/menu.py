@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import os
 from aiogram import Router, F, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from aiogram.types import (
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo,
+)
 
 from app.bot.keyboards.common import main_menu_kb
 from app.bot.handlers.family import family_menu
 from app.bot.handlers.calendar import calendar_last
+from app.bot.handlers.children import children_entry  # <-- добавлено
 
 router = Router(name="menu")
 
 # Тексты кнопок (точно как в клавиатуре)
 BTN_SLEEP = "🛌 Сон"
 BTN_FEED = "🍼 Кормление"
+BTN_CHILD = "👶 Профиль ребёнка"   # <-- добавлено
 BTN_FAMILY = "👨‍👩‍👧 Семья"
 BTN_CALENDAR = "📅 Календарь"
 BTN_SETTINGS = "⚙️ Настройки"
@@ -43,6 +48,12 @@ async def section_feeding(message: types.Message):
     )
     await message.answer("Трекер кормления.\nВыбери действие:", reply_markup=kb)
 
+# --- Профиль ребёнка ---
+@router.message(F.text.in_({BTN_CHILD, "Профиль ребёнка"}))
+async def open_children_via_button(message: types.Message):
+    # просто делегируем готовому entry-хендлеру children
+    await children_entry(message)
+
 # --- Раздел «Здоровье» (если используешь) ---
 @router.message(F.text.in_({"Здоровье"}))
 async def section_health(message: types.Message):
@@ -66,7 +77,7 @@ async def open_calendar_via_button(message: types.Message):
 async def open_family_via_button(message: types.Message):
     await family_menu(message)
 
-# --- Настройки (если используешь отдельный раздел) ---
+# --- Настройки ---
 @router.message(F.text.in_({BTN_SETTINGS, "Настройки"}))
 async def section_settings(message: types.Message):
     await message.answer("Здесь будут настройки напоминаний и уведомлений. ⚙️")
@@ -76,7 +87,7 @@ async def section_settings(message: types.Message):
 async def back_to_main(message: types.Message):
     await message.answer("Главное меню. Выбери раздел:", reply_markup=main_menu_kb())
 
-# --- (опционально) Мини-приложение, если у тебя есть кнопка «Мини-приложение» ---
+# --- (опционально) Мини-приложение ---
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 
 def webapp_open_kb(url: str) -> InlineKeyboardMarkup:
