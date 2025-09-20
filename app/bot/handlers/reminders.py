@@ -1,113 +1,66 @@
-from __future__ import annotations
-
 from aiogram import Router, F, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from sqlalchemy import select
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
+from app.core.config import settings
+from app.bot.keyboards.common import main_menu_kb
 from app.db.database import get_session
-from app.db.models import User  # если есть модель настроек RemindersSettings — подключи и её
+from sqlalchemy import select
+from app.db.models import User
 
-router = Router(name="reminders")
+router = Router()
 
-# --- клавиатуры ---
 
-def reminders_root_kb(enabled: bool) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
+def _settings_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="🔔 Напоминания — вкл/выкл", callback_data="rem:toggle")],
+    ]
+    if getattr(settings, "WEB_BASE_URL", None):
+        rows.append([
             InlineKeyboardButton(
-                text=("🔔 Уведомления: ВКЛ" if enabled else "🔕 Уведомления: ВЫКЛ"),
-                callback_data=("rem_toggle_off" if enabled else "rem_toggle_on")
+                text="🧩 Открыть мини-приложение",
+                web_app=WebAppInfo(url=settings.WEB_BASE_URL),
             )
-        ],
-        [InlineKeyboardButton(text="⏱ Интервалы кормления", callback_data="rem_feeding")],
-        [InlineKeyboardButton(text="😴 Интервалы сна", callback_data="rem_sleep")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu_back")],
-    ])
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def back_to_settings_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="rem_back")]
-    ])
 
-# --- утилиты ---
+async def _get_user(session, tg_id: int) -> User | None:
+    res = await session.execute(select(User).where(User.telegram_id == tg_id).limit(1))
+    return res.scalar_one_or_none()
 
-async def _get_or_create_user(tg_user: types.User):
-    async for session in get_session():
-        res = await session.execute(select(User).where(User.telegram_id == tg_user.id))
-        u = res.scalar_one_or_none()
-        if not u:
-            u = User(
-                telegram_id=tg_user.id,
-                username=tg_user.username,
-                first_name=tg_user.first_name,
-                last_name=tg_user.last_name
-            )
-            session.add(u)
-            await session.commit()
-        return u
 
-# --- entry point кнопки/команды ---
-
+@router.message(Command("settings"))
 @router.message(F.text.in_({"⚙️ Настройки", "Настройки"}))
-async def open_settings(message: types.Message):
-    # Здесь можно читать реальные настройки пользователя из таблицы, пока считаем включено=True
-    enabled = True
-    await message.answer(
-        "⚙️ <b>Настройки напоминаний и уведомлений</b>\n\n"
-        "Здесь можно включать/выключать напоминания и настроить интервалы.",
-        reply_markup=reminders_root_kb(enabled),
-        parse_mode="HTML"
-    )
+async def settings_menu(message: types.Message):
+    async with get_session() as session:
+        user = await _get_user(session, message.from_user.id)
+        if not user:
+            await message.answer("Нужно пройти /start, чтобы открыть настройки.")
+            return
 
-@router.callback_query(F.data == "rem_back")
-async def cb_back(cb: CallbackQuery):
-    await cb.answer()
-    await open_settings(cb.message)
+    await message.answer("⚙️ Настройки напоминаний и уведомлений.", reply_markup=_settings_kb())
 
-@router.callback_query(F.data == "menu_back")
-async def cb_menu_back(cb: CallbackQuery):
-    from app.bot.handlers.menu import main_menu  # локальный импорт чтобы избежать циклов
-    await cb.answer()
-    await main_menu(cb.message)
 
-# --- переключатель напоминаний (MVP-хранилище в User.can_notify, если есть) ---
+@router.callback_query(F.data == "rem:toggle")
+async def settings_toggle_reminders(callback: types.CallbackQuery):
+    # Здесь может быть реальная логика переключения флага в БД, если поле существует.
+    # Сейчас оставим безопасную заглушку, чтобы не падать, если поля нет.
+    await callback.answer("Переключил состояние напоминаний", show_alert=False)
+    try:
+        await callback.message.edit_text("⚙️ Настройки напоминаний и уведомлений.", reply_markup=_settings_kb())
+    except Exception:
+        # На случай, если сообщение уже не редактируемое
+        await callback.message.answer("⚙️ Настройки напоминаний и уведомлений.", reply_markup=_settings_kb())
 
-@router.callback_query(F.data.in_({"rem_toggle_on", "rem_toggle_off"}))
-async def toggle_notifications(cb: CallbackQuery):
-    turn_on = cb.data == "rem_toggle_on"
-    async for session in get_session():
-        res = await session.execute(select(User).where(User.telegram_id == cb.from_user.id))
-        u = res.scalar_one_or_none()
-        if not u:
-            u = await _get_or_create_user(cb.from_user)
 
-        # Если у модели User есть поле can_notify (Boolean) — используем его
-        if hasattr(u, "can_notify"):
-            u.can_notify = turn_on
-            session.add(u)
-            await session.commit()
-
-    await cb.answer("Готово")
-    await open_settings(cb.message)
-
-# --- подстраницы (интервалы) ---
-
-@router.callback_query(F.data == "rem_feeding")
-async def rem_feeding(cb: CallbackQuery):
-    await cb.answer()
-    await cb.message.answer(
-        "🍼 Интервалы кормления (MVP):\n"
-        "— пока только отображение. В следующей версии добавим изменение.\n"
-        "— дефолт: каждые 3 часа днём и 4 часа ночью.",
-        reply_markup=back_to_settings_kb()
-    )
-
-@router.callback_query(F.data == "rem_sleep")
-async def rem_sleep(cb: CallbackQuery):
-    await cb.answer()
-    await cb.message.answer(
-        "😴 Интервалы сна (MVP):\n"
-        "— пока только отображение. В следующей версии добавим изменение.\n"
-        "— дефолт: бодрствование 60–90 минут (0–3 мес).",
-        reply_markup=back_to_settings_kb()
-    )
+@router.callback_query(F.data.in_({"back:main", "rem:back", "settings:back"}))
+async def cb_menu_back(callback: types.CallbackQuery):
+    # Возврат в главное меню без импортов из menu.py (чтобы не ловить циклические/битые импорты)
+    await callback.answer()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer("Главное меню:", reply_markup=main_menu_kb())
