@@ -1,111 +1,123 @@
 from __future__ import annotations
 
-import logging
+from datetime import datetime, timedelta, timezone
+
 from aiogram import Router, F, types
-from sqlalchemy import select, desc
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 
 from app.db.database import get_session
 from app.db.models import User, Baby
-# Если у тебя есть модели Sleep / Feeding / CareLog — раскомментируй строки ниже.
-# from app.db.models import Sleep, Feeding, CareLog
+
+# Попытка импортировать универсальный журнал, если он у тебя есть
+try:
+    from app.db.models import CareLog
+    HAS_CARELOG = True
+except Exception:
+    HAS_CARELOG = False
+
+# Попытка резервных моделей
+try:
+    from app.db.models import Feeding
+except Exception:
+    Feeding = None
+
+try:
+    from app.db.models import Sleep
+except Exception:
+    Sleep = None
 
 router = Router(name="calendar")
-CALENDAR_ROWS = 15
-
-log = logging.getLogger(__name__)
-
-
-async def _get_or_create_user(session: AsyncSession, tg: types.User) -> User:
-    """Находим или создаём пользователя по telegram_id."""
-    res = await session.execute(select(User).where(User.telegram_id == tg.id))
-    user = res.scalar_one_or_none()
-    if not user:
-        user = User(
-            telegram_id=tg.id,
-            username=tg.username,
-            first_name=tg.first_name,
-            last_name=tg.last_name,
-        )
-        session.add(user)
-        await session.flush()
-    return user
-
-
-def _fmt(label: str, when, extra: str = "") -> str:
-    ts = when.strftime("%d.%m %H:%M")
-    return f"• {ts} — {label}" + (f" ({extra})" if extra else "")
-
 
 @router.message(F.text.in_({"📅 Календарь", "Календарь"}))
 async def calendar_last(message: types.Message):
-    """Сводка последних событий: сон, кормления, уход."""
-    # Для отладки убедимся, что задеплоилась нужная версия
-    log.info("calendar.py handler loaded: version=async-for-session v2")
+    tg_id = message.from_user.id
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=1)
 
-    lines: list[str] = []
-    lines.append("📅 <b>Последние события</b>")
-
-    # ВАЖНО: получаем AsyncSession через async for
     async for session in get_session():
-        user = await _get_or_create_user(session, message.from_user)
+        # юзер
+        u_res = await session.execute(select(User).where(User.telegram_id == tg_id))
+        user = u_res.scalar_one_or_none()
+        if not user:
+            await message.answer("Пока нет данных. Сначала начните пользоваться ботом 😊")
+            return
 
-        # Берём первого ребёнка пользователя (MVP). Если есть active_baby_id — подставь его.
-        res_baby = await session.execute(
-            select(Baby).where(Baby.user_id == user.id).order_by(Baby.id.asc()).limit(1)
-        )
-        baby = res_baby.scalar_one_or_none()
+        lines = [f"📅 <b>Последние события за 24 часа</b>:"]
+        events = []
 
-        # ---- Сон (раскомментируй, если модель Sleep существует) ----
-        # try:
-        #     q_sleep = select(Sleep).order_by(desc(Sleep.start_time)).limit(CALENDAR_ROWS)
-        #     if baby:
-        #         q_sleep = q_sleep.where(Sleep.baby_id == baby.id)
-        #     res_sleep = await session.execute(q_sleep)
-        #     sleeps = res_sleep.scalars().all()
-        #     if sleeps:
-        #         lines.append("\n<b>Сон:</b>")
-        #         for s in sleeps:
-        #             if s.end_time:
-        #                 mins = int((s.end_time - s.start_time).total_seconds() // 60)
-        #                 lines.append(_fmt("Сон завершён", s.end_time, extra=f"~{mins} мин"))
-        #             else:
-        #                 lines.append(_fmt("Сон начат", s.start_time))
-        # except Exception as e:
-        #     log.warning("Sleep block skipped: %s", e)
+        if HAS_CARELOG:
+            # Берём журнал — за сутки
+            q = (
+                select(CareLog)
+                .where(CareLog.at >= since)
+                .options(joinedload(CareLog.baby))
+                .order_by(CareLog.at.desc())
+                .limit(25)
+            )
+            res = await session.execute(q)
+            for row in res.scalars():
+                baby_name = (row.baby.name if row.baby else "Без имени")
+                when = row.at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+                what = row.action  # например: feeding/sleep/bath/etc
+                extra = []
+                if getattr(row, "amount_ml", None):
+                    extra.append(f"{row.amount_ml} мл")
+                if getattr(row, "duration_min", None):
+                    extra.append(f"{row.duration_min} мин")
+                if getattr(row, "side", None):
+                    extra.append(f"сторона: {row.side}")
+                if getattr(row, "note", None):
+                    extra.append(row.note)
 
-        # ---- Кормления (раскомментируй, если есть модель Feeding) ----
-        # try:
-        #     q_feed = select(Feeding).order_by(desc(Feeding.created_at)).limit(CALENDAR_ROWS)
-        #     if baby:
-        #         q_feed = q_feed.where(Feeding.baby_id == baby.id)
-        #     res_feed = await session.execute(q_feed)
-        #     feeds = res_feed.scalars().all()
-        #     if feeds:
-        #         lines.append("\n<b>Кормление:</b>")
-        #         for f in feeds:
-        #             extra = "; ".join(
-        #                 x for x in [
-        #                     f.type or "",
-        #                     f"{getattr(f, 'amount_ml', None)} мл" if getattr(f, "amount_ml", None) else ""
-        #                 ] if x
-        #             )
-        #             lines.append(_fmt("Кормление", f.created_at, extra=extra))
-        # except Exception as e:
-        #     log.warning("Feeding block skipped: %s", e)
+                events.append((row.at, f"• {when} — {baby_name}: {what}" + (f" ({', '.join(extra)})" if extra else "")))
+        else:
+            # Резерв: склеиваем Feeding/Sleep если они существуют
+            if Feeding is not None:
+                qf = (
+                    select(Feeding)
+                    .where(Feeding.started_at >= since)
+                    .options(joinedload(Feeding.baby))
+                    .order_by(Feeding.started_at.desc())
+                    .limit(25)
+                )
+                rf = await session.execute(qf)
+                for f in rf.scalars():
+                    baby_name = (f.baby.name if f.baby else "Без имени")
+                    when = f.started_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+                    extra = []
+                    if getattr(f, "amount_ml", None):
+                        extra.append(f"{f.amount_ml} мл")
+                    if getattr(f, "side", None):
+                        extra.append(f"сторона: {f.side}")
+                    events.append((f.started_at, f"• {when} — {baby_name}: кормление" + (f" ({', '.join(extra)})" if extra else "")))
 
-        # ---- Уход (раскомментируй, если есть модель CareLog) ----
-        # try:
-        #     q_care = select(CareLog).order_by(desc(CareLog.created_at)).limit(CALENDAR_ROWS)
-        #     if baby:
-        #         q_care = q_care.where(CareLog.baby_id == baby.id)
-        #     res_care = await session.execute(q_care)
-        #     cares = res_care.scalars().all()
-        #     if cares:
-        #         lines.append("\n<b>Уход:</b>")
-        #         for c in cares:
-        #             lines.append(_fmt(c.action or "Действие", c.created_at, extra=c.note or ""))
-        # except Exception as e:
-        #     log.warning("CareLog block skipped: %s", e)
+            if Sleep is not None:
+                qs = (
+                    select(Sleep)
+                    .where(Sleep.started_at >= since)
+                    .options(joinedload(Sleep.baby))
+                    .order_by(Sleep.started_at.desc())
+                    .limit(25)
+                )
+                rs = await session.execute(qs)
+                for s in rs.scalars():
+                    baby_name = (s.baby.name if s.baby else "Без имени")
+                    when = s.started_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+                    duration = ""
+                    if getattr(s, "ended_at", None):
+                        delta = (s.ended_at - s.started_at)
+                        mins = max(1, int(delta.total_seconds() // 60))
+                        duration = f" ({mins} мин)"
+                    events.append((s.started_at, f"• {when} — {baby_name}: сон{duration}"))
 
-    await message.answer("\n".join(lines) if lines else "Пока записей нет.")
+        # вывод
+        if not events:
+            await message.answer("Пока нет событий за последние 24 часа.")
+            return
+
+        # сортировка по времени убыв.
+        events.sort(key=lambda x: x[0], reverse=True)
+        # только текст
+        text = "\n".join([lines[0]] + [e[1] for e in events[:25]])
+        await message.answer(text, parse_mode="HTML")

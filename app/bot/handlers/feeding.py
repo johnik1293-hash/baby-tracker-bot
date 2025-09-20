@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from aiogram import Router, F, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, date
 
+from aiogram import Router, F, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_session
-from app.db.models import User, Baby, FeedingRecord
-from app.db.models import User, Baby, UserSettings  # + нужные модели раздела
+from app.db.models import User, Baby, FeedingRecord, UserSettings
+from app.services.carelog import log_event
 
 router = Router(name="feeding_db")
 
@@ -58,15 +58,24 @@ async def _get_or_create_user(session: AsyncSession, tg: types.User) -> User:
         await session.flush()
     return user
 
-async def _get_primary_baby(session: AsyncSession, user_id: int) -> Baby | None:
-    q = await session.execute(select(Baby).where(Baby.user_id == user_id).limit(1))
-    return q.scalar_one_or_none()
+async def _get_active_baby(session: AsyncSession, user_id: int) -> Baby | None:
+    # сначала пробуем активного
+    qs = await session.execute(select(UserSettings).where(UserSettings.user_id == user_id))
+    settings = qs.scalar_one_or_none()
+    if settings and settings.active_baby_id:
+        qb = await session.execute(select(Baby).where(Baby.id == settings.active_baby_id, Baby.user_id == user_id))
+        baby = qb.scalar_one_or_none()
+        if baby:
+            return baby
+    # иначе — первый по списку
+    qb = await session.execute(select(Baby).where(Baby.user_id == user_id).order_by(Baby.id.asc()).limit(1))
+    return qb.scalar_one_or_none()
 
 # ---------- Хендлеры сообщений ----------
 
 @router.message(F.text == "Грудное молоко")
 async def feeding_breast(message: types.Message):
-    """Просто фиксируем событие грудного вскармливания без объёма."""
+    """Фиксируем событие грудного вскармливания (без объёма)."""
     async for session in get_session():
         user = await _get_or_create_user(session, message.from_user)
         baby = await _get_active_baby(session, user.id)
@@ -77,6 +86,9 @@ async def feeding_breast(message: types.Message):
         rec = FeedingRecord(baby_id=baby.id, feeding_type="breast")
         session.add(rec)
         await session.commit()
+
+        # Лог в семейный календарь
+        await log_event(session, actor_user_id=user.id, event_type="feeding", details="грудное молоко", baby_id=baby.id)
 
     await message.answer("🤱 Записано грудное вскармливание.")
 
@@ -114,14 +126,17 @@ async def feeding_stats(message: types.Message):
         )
         items = q_last.scalars().all()
 
-        # агрегаты за сегодня (по локальному дню; для простоты — по UTC-дате)
+        # агрегаты за сегодня (для простоты — по UTC-дате)
         today = date.today()
+        day_start = datetime.combine(today, datetime.min.time())
+        day_end = datetime.combine(today, datetime.max.time())
+
         q_sum_ml = await session.execute(
             select(func.coalesce(func.sum(FeedingRecord.amount_ml), 0))
             .where(
                 FeedingRecord.baby_id == baby.id,
-                FeedingRecord.fed_at >= datetime.combine(today, datetime.min.time()),
-                FeedingRecord.fed_at <= datetime.combine(today, datetime.max.time()),
+                FeedingRecord.fed_at >= day_start,
+                FeedingRecord.fed_at <= day_end,
             )
         )
         total_ml = int(q_sum_ml.scalar_one() or 0)
@@ -130,8 +145,8 @@ async def feeding_stats(message: types.Message):
             select(func.coalesce(func.sum(FeedingRecord.amount_g), 0))
             .where(
                 FeedingRecord.baby_id == baby.id,
-                FeedingRecord.fed_at >= datetime.combine(today, datetime.min.time()),
-                FeedingRecord.fed_at <= datetime.combine(today, datetime.max.time()),
+                FeedingRecord.fed_at >= day_start,
+                FeedingRecord.fed_at <= day_end,
             )
         )
         total_g = int(q_sum_g.scalar_one() or 0)
@@ -140,10 +155,12 @@ async def feeding_stats(message: types.Message):
         await message.answer("Записей кормления ещё нет.")
         return
 
+    type_map = {"breast": "Грудное молоко", "formula": "Смесь", "water": "Вода", "solid": "Прикорм"}
+
     lines = ["📝 Последние кормления:"]
     for r in items:
         t = r.fed_at.strftime("%d.%m %H:%M")
-        tpe = {"breast": "Грудное молоко", "formula": "Смесь", "water": "Вода", "solid": "Прикорм"}.get(r.feeding_type, r.feeding_type)
+        tpe = type_map.get(r.feeding_type, r.feeding_type)
         vol = ""
         if r.amount_ml:
             vol = f" — {r.amount_ml} мл"
@@ -153,7 +170,7 @@ async def feeding_stats(message: types.Message):
             vol += f" ({r.note})"
         lines.append(f"• {t} | {tpe}{vol}")
 
-    lines.append(f"\nИтого за сегодня: {total_ml} мл жидкого + {total_g} г прикорма")
+    lines.append(f"\nИтого за сегодня: {total_ml} мл напитков + {total_g} г прикорма")
     await message.answer("\n".join(lines))
 
 # ---------- Коллбэки выбора объёма ----------
@@ -173,6 +190,8 @@ async def cb_formula_amount(callback: types.CallbackQuery):
         session.add(rec)
         await session.commit()
 
+        await log_event(session, actor_user_id=user.id, event_type="feeding", details=f"смесь {amount} мл", baby_id=baby.id)
+
     await callback.answer()
     await callback.message.answer(f"🍼 Смесь: {amount} мл — записано.")
 
@@ -190,6 +209,8 @@ async def cb_water_amount(callback: types.CallbackQuery):
         rec = FeedingRecord(baby_id=baby.id, feeding_type="water", amount_ml=amount)
         session.add(rec)
         await session.commit()
+
+        await log_event(session, actor_user_id=user.id, event_type="feeding", details=f"вода {amount} мл", baby_id=baby.id)
 
     await callback.answer()
     await callback.message.answer(f"💧 Вода: {amount} мл — записано.")
@@ -209,17 +230,7 @@ async def cb_solid_amount(callback: types.CallbackQuery):
         session.add(rec)
         await session.commit()
 
+        await log_event(session, actor_user_id=user.id, event_type="feeding", details=f"прикорм {amount} г", baby_id=baby.id)
+
     await callback.answer()
     await callback.message.answer(f"🥣 Прикорм: {amount} г — записано.")
-async def _get_active_baby(session: AsyncSession, user_id: int) -> Baby | None:
-    # сначала пробуем активного
-    qs = await session.execute(select(UserSettings).where(UserSettings.user_id == user_id))
-    settings = qs.scalar_one_or_none()
-    if settings and settings.active_baby_id:
-        qb = await session.execute(select(Baby).where(Baby.id == settings.active_baby_id, Baby.user_id == user_id))
-        baby = qb.scalar_one_or_none()
-        if baby:
-            return baby
-    # иначе — первый по списку
-    qb = await session.execute(select(Baby).where(Baby.user_id == user_id).order_by(Baby.id.asc()).limit(1))
-    return qb.scalar_one_or_none()

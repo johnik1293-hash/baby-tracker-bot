@@ -5,14 +5,12 @@ from typing import Optional
 
 from aiogram import Router, F, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_session
-from app.db.models import User, Baby, SleepRecord
-
-from app.db.models import User, Baby, UserSettings  # + нужные модели раздела
+from app.db.models import User, Baby, SleepRecord, UserSettings
+from app.services.carelog import log_event
 
 router = Router(name="sleep_db")
 
@@ -41,12 +39,18 @@ async def _get_or_create_user(session: AsyncSession, tg: types.User) -> User:
         await session.flush()
     return user
 
-async def _get_primary_baby(session: AsyncSession, user_id: int) -> Optional[Baby]:
-    # Пока берём первого ребёнка пользователя (позже сделаем выбор)
-    q = await session.execute(
-        select(Baby).where(Baby.user_id == user_id).limit(1)
-    )
-    return q.scalar_one_or_none()
+async def _get_active_baby(session: AsyncSession, user_id: int) -> Optional[Baby]:
+    # сначала пробуем активного
+    qs = await session.execute(select(UserSettings).where(UserSettings.user_id == user_id))
+    settings = qs.scalar_one_or_none()
+    if settings and settings.active_baby_id:
+        qb = await session.execute(select(Baby).where(Baby.id == settings.active_baby_id, Baby.user_id == user_id))
+        baby = qb.scalar_one_or_none()
+        if baby:
+            return baby
+    # иначе — первый по списку
+    qb = await session.execute(select(Baby).where(Baby.user_id == user_id).order_by(Baby.id.asc()).limit(1))
+    return qb.scalar_one_or_none()
 
 async def _get_open_sleep(session: AsyncSession, baby_id: int) -> Optional[SleepRecord]:
     q = await session.execute(
@@ -81,6 +85,9 @@ async def sleep_start(message: types.Message):
         session.add(rec)
         await session.commit()
 
+        # Лог в семейный календарь
+        await log_event(session, actor_user_id=user.id, event_type="sleep_start", details="старт сна", baby_id=baby.id)
+
     await message.answer("🛌 Засыпание зафиксировано. Когда проснётся — нажмите «Проснулся».")
 
 @router.message(F.text == "Проснулся")
@@ -104,11 +111,15 @@ async def sleep_end(message: types.Message):
         rec.duration_minutes = int((rec.sleep_end - rec.sleep_start).total_seconds() // 60)
         await session.commit()
 
-        hours = (rec.duration_minutes or 0) // 60
-        minutes = (rec.duration_minutes or 0) % 60
+        minutes = rec.duration_minutes or 0
+        # Лог в семейный календарь
+        await log_event(session, actor_user_id=user.id, event_type="sleep_end", details=f"сон {minutes} мин", baby_id=baby.id)
+
+        hours = minutes // 60
+        mins = minutes % 60
 
     await message.answer(
-        f"✅ Пробуждение!\nДлительность: {hours}ч {minutes}м\n\nОцените качество сна:",
+        f"✅ Пробуждение!\nДлительность: {hours}ч {mins}м\n\nОцените качество сна:",
         reply_markup=sleep_inline_quality_kb()
     )
 
@@ -144,47 +155,3 @@ async def sleep_quality(callback: types.CallbackQuery):
     human = mapping.get(quality, quality)
     await callback.answer()
     await callback.message.answer(f"Качество сна: <b>{human}</b> сохранено.")
-
-@router.message(F.text == "Статистика сна")
-async def sleep_stats(message: types.Message):
-    """Простая текстовая статистика: последние 5 записей."""
-    async for session in get_session():
-        user = await _get_or_create_user(session, message.from_user)
-        baby = await _get_active_baby(session, user.id)
-        if not baby:
-            await message.answer("Пока нет данных. Создайте профиль ребёнка и добавьте записи сна.")
-            return
-
-        q = await session.execute(
-            select(SleepRecord)
-            .where(SleepRecord.baby_id == baby.id)
-            .order_by(SleepRecord.sleep_start.desc())
-            .limit(5)
-        )
-        items = q.scalars().all()
-
-    if not items:
-        await message.answer("Записей сна ещё нет. Нажмите «Начал спать», чтобы начать отслеживание.")
-        return
-
-    lines = ["📝 Последние записи сна:"]
-    for r in items:
-        start = r.sleep_start.strftime("%d.%m %H:%M")
-        end = r.sleep_end.strftime("%d.%m %H:%M") if r.sleep_end else "…"
-        dur = f"{(r.duration_minutes or 0) // 60}ч {(r.duration_minutes or 0) % 60}м" if r.duration_minutes else "—"
-        ql = {"good": "Отлично", "ok": "Нормально", "bad": "Беспокойно"}.get(r.quality or "", "—")
-        lines.append(f"• {start} → {end} | {dur} | {ql}")
-
-    await message.answer("\n".join(lines))
-async def _get_active_baby(session: AsyncSession, user_id: int) -> Baby | None:
-    # сначала пробуем активного
-    qs = await session.execute(select(UserSettings).where(UserSettings.user_id == user_id))
-    settings = qs.scalar_one_or_none()
-    if settings and settings.active_baby_id:
-        qb = await session.execute(select(Baby).where(Baby.id == settings.active_baby_id, Baby.user_id == user_id))
-        baby = qb.scalar_one_or_none()
-        if baby:
-            return baby
-    # иначе — первый по списку
-    qb = await session.execute(select(Baby).where(Baby.user_id == user_id).order_by(Baby.id.asc()).limit(1))
-    return qb.scalar_one_or_none()
