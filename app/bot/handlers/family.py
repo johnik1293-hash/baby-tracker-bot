@@ -1,115 +1,225 @@
-# app/bot/handlers/family.py
 from __future__ import annotations
-from datetime import datetime, timedelta
-from uuid import uuid4
 
-from aiogram import Router, types, F
-from aiogram.filters import Command
+from aiogram import Router, F, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_session
-from app.db.models import Family, FamilyMember, FamilyInvite, User
-from app.services.carelog import get_user_family_id
+from app.db.models import User, Family, FamilyMember
 
 router = Router(name="family")
 
-@router.message(Command("family"))
-async def family_menu(message: types.Message, session: AsyncSession = get_session()):
-    user_id = message.from_user.id
-    # найдём семью пользователя
-    q = select(Family).join(FamilyMember).where(FamilyMember.user_id == select(User.id).where(User.telegram_id == user_id).scalar_subquery())
-    res = await session.execute(q)
-    family = res.scalar_one_or_none()
+# ---------- helpers ----------
 
-    if not family:
-        kb = [
-            [types.InlineKeyboardButton(text="➕ Создать семью", callback_data="family_create")],
-            [types.InlineKeyboardButton(text="🔗 Ввести код приглашения", callback_data="family_join_prompt")],
-        ]
-        await message.answer("У тебя пока нет семьи.", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
-        return
+def family_menu_kb(has_family: bool) -> InlineKeyboardMarkup:
+    if has_family:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Участники семьи", callback_data="fam_members")],
+            [InlineKeyboardButton(text="🔗 Пригласить по коду", callback_data="fam_invite")],
+            [InlineKeyboardButton(text="🚪 Покинуть семью", callback_data="fam_leave")],
+        ])
+    else:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Создать семью", callback_data="fam_create")],
+            [InlineKeyboardButton(text="🔑 Ввести код приглашения", callback_data="fam_join")],
+        ])
 
-    # есть семья — покажем
-    kb = [
-        [types.InlineKeyboardButton(text="👥 Участники", callback_data="family_members")],
-        [types.InlineKeyboardButton(text="🔗 Пригласить (код)", callback_data="family_invite")],
-        [types.InlineKeyboardButton(text="📅 Семейный календарь", callback_data="family_calendar")],
-    ]
-    await message.answer(f"Семья: <b>{family.title}</b>", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
 
-@router.callback_query(F.data == "family_create")
-async def family_create(cb: types.CallbackQuery, session: AsyncSession = get_session()):
-    tg_id = cb.from_user.id
-    # найдём/создадим User
-    u = await session.execute(select(User).where(User.telegram_id == tg_id))
-    user = u.scalar_one_or_none()
+async def _get_or_create_user(session: AsyncSession, tg: types.User) -> User:
+    res = await session.execute(select(User).where(User.telegram_id == tg.id))
+    user = res.scalar_one_or_none()
     if not user:
-        user = User(telegram_id=tg_id, username=cb.from_user.username, first_name=cb.from_user.first_name, last_name=cb.from_user.last_name)
+        user = User(
+            telegram_id=tg.id,
+            username=tg.username,
+            first_name=tg.first_name,
+            last_name=tg.last_name,
+        )
         session.add(user)
         await session.flush()
+    return user
 
-    fam = Family(title="Наша семья")
-    session.add(fam)
-    await session.flush()
 
-    fm = FamilyMember(family_id=fam.id, user_id=user.id, role="owner")
-    session.add(fm)
-    await session.commit()
-
-    await cb.message.edit_text(f"Семья создана: <b>{fam.title}</b>.\nТеперь пригласи членов семьи: меню → /family → «Пригласить (код)»")
-    await cb.answer()
-
-@router.callback_query(F.data == "family_invite")
-async def family_invite(cb: types.CallbackQuery, session: AsyncSession = get_session()):
-    tg_id = cb.from_user.id
-    # найдём user
-    u = await session.execute(select(User).where(User.telegram_id == tg_id))
-    user = u.scalar_one_or_none()
-    if not user:
-        await cb.answer("Ошибка: нет профиля пользователя", show_alert=True)
-        return
-    # найдём семью
-    fam_id = await get_user_family_id(session, user.id)
-    if not fam_id:
-        await cb.answer("У тебя нет семьи", show_alert=True)
-        return
-    # создадим инвайт на 7 дней
-    code = uuid4().hex[:8]
-    inv = FamilyInvite(family_id=fam_id, code=code, expires_at=datetime.utcnow() + timedelta(days=7), is_active=True)
-    session.add(inv)
-    await session.commit()
-    await cb.message.answer(f"Код приглашения: <code>{code}</code>\nДействителен 7 дней.\nНовый участник: /join {code}")
-    await cb.answer()
-
-@router.message(F.text.regexp(r"^/join\s+([A-Za-z0-9]+)$"))
-async def family_join(message: types.Message, session: AsyncSession = get_session()):
-    code = message.text.split(maxsplit=1)[1].strip()
-    # инвайт
-    q = select(FamilyInvite).where(FamilyInvite.code == code, FamilyInvite.is_active == True)  # noqa: E712
+async def _get_user_family(session: AsyncSession, user_id: int) -> Family | None:
+    q = (
+        select(Family)
+        .join(FamilyMember, FamilyMember.family_id == Family.id)
+        .where(FamilyMember.user_id == user_id)
+        .limit(1)
+    )
     res = await session.execute(q)
-    inv = res.scalar_one_or_none()
-    if not inv:
-        await message.answer("Неверный или использованный код.")
-        return
-    if inv.expires_at and inv.expires_at < datetime.utcnow():
-        await message.answer("Код истёк.")
-        return
+    return res.scalar_one_or_none()
 
-    tg_id = message.from_user.id
-    u = await session.execute(select(User).where(User.telegram_id == tg_id))
-    user = u.scalar_one_or_none()
-    if not user:
-        user = User(telegram_id=tg_id, username=message.from_user.username, first_name=message.from_user.first_name, last_name=message.from_user.last_name)
-        session.add(user)
+
+# ---------- entry ----------
+
+@router.message(F.text.in_({"👨‍👩‍👧 Семья", "Семья"}))
+async def family_menu(message: types.Message):
+    # ВАЖНО: берём сессию через async for, а не session = get_session()
+    async for session in get_session():
+        user = await _get_or_create_user(session, message.from_user)
+        fam = await _get_user_family(session, user.id)
+
+        if fam:
+            # посчитаем участников
+            mem_q = await session.execute(
+                select(FamilyMember).where(FamilyMember.family_id == fam.id)
+            )
+            members = mem_q.scalars().all()
+            text = (
+                f"🏠 Ваша семья: <b>{fam.name or 'Без названия'}</b>\n"
+                f"Участников: <b>{len(members)}</b>\n\n"
+                "Выберите действие:"
+            )
+            kb = family_menu_kb(has_family=True)
+        else:
+            text = (
+                "У вас пока нет семьи.\n\n"
+                "Создайте семью или присоединитесь по коду приглашения:"
+            )
+            kb = family_menu_kb(has_family=False)
+
+    await message.answer(text, reply_markup=kb)
+
+
+# ---------- callbacks ----------
+
+@router.callback_query(F.data == "fam_create")
+async def fam_create(cb: types.CallbackQuery):
+    async for session in get_session():
+        user = await _get_or_create_user(session, cb.from_user)
+        # если уже есть семья — просто обновим меню
+        fam = await _get_user_family(session, user.id)
+        if fam:
+            await cb.answer("Семья уже создана")
+            await family_menu(cb.message)
+            return
+
+        fam = Family(name=f"Семья {user.first_name or user.username or user.telegram_id}")
+        session.add(fam)
         await session.flush()
 
-    # уже участник?
-    exists = await session.execute(select(FamilyMember).where(FamilyMember.family_id == inv.family_id, FamilyMember.user_id == user.id))
-    if exists.scalar_one_or_none():
-        await message.answer("Ты уже в этой семье.")
-        return
+        session.add(FamilyMember(family_id=fam.id, user_id=user.id, role="owner"))
+        await session.commit()
 
-    session.add(FamilyMember(family_id=inv.family_id, user_id=user.id, role="parent"))
-    await session.commit()
-    await message.answer("Готово! Ты присоединился(ась) к семье. Открой /family.")
+    await cb.answer("Семья создана")
+    await family_menu(cb.message)
+
+
+@router.callback_query(F.data == "fam_members")
+async def fam_members(cb: types.CallbackQuery):
+    async for session in get_session():
+        user = await _get_or_create_user(session, cb.from_user)
+        fam = await _get_user_family(session, user.id)
+        if not fam:
+            await cb.answer()
+            await cb.message.answer("Сначала создайте семью или вступите в существующую.")
+            return
+
+        mem_q = await session.execute(
+            select(FamilyMember, User)
+            .join(User, User.id == FamilyMember.user_id)
+            .where(FamilyMember.family_id == fam.id)
+            .order_by(FamilyMember.id.asc())
+        )
+        rows = mem_q.all()
+
+    lines = ["👥 <b>Участники семьи</b>:"]
+    for m, u in rows:
+        who = u.first_name or u.username or str(u.telegram_id)
+        role = m.role or "member"
+        lines.append(f"• {who} — {role}")
+
+    await cb.answer()
+    await cb.message.answer("\n".join(lines))
+
+
+@router.callback_query(F.data == "fam_invite")
+async def fam_invite(cb: types.CallbackQuery):
+    async for session in get_session():
+        user = await _get_or_create_user(session, cb.from_user)
+        fam = await _get_user_family(session, user.id)
+        if not fam:
+            await cb.answer()
+            await cb.message.answer("Сначала создайте семью.")
+            return
+
+        # простой пригласительный код = id семьи (для MVP)
+        code = str(fam.id)
+
+    await cb.answer()
+    await cb.message.answer(
+        "🔗 Приглашение в семью:\n"
+        f"Код: <code>{code}</code>\n\n"
+        "Другой участник должен выбрать «Семья» → «Ввести код приглашения» и отправить этот код."
+    )
+
+
+@router.callback_query(F.data == "fam_join")
+async def fam_join_prompt(cb: types.CallbackQuery):
+    await cb.answer()
+    await cb.message.answer(
+        "Отправьте сообщением <b>код приглашения</b> (число). "
+        "Я добавлю вас в соответствующую семью."
+    )
+
+
+@router.message(F.text.regexp(r"^\d{1,12}$"))
+async def fam_join_apply(message: types.Message):
+    code = int(message.text.strip())
+    async for session in get_session():
+        user = await _get_or_create_user(session, message.from_user)
+
+        # есть ли такая семья?
+        res = await session.execute(select(Family).where(Family.id == code))
+        fam = res.scalar_one_or_none()
+        if not fam:
+            await message.answer("❌ Семья с таким кодом не найдена.")
+            return
+
+        # уже участник?
+        res = await session.execute(
+            select(FamilyMember).where(
+                FamilyMember.family_id == fam.id,
+                FamilyMember.user_id == user.id,
+            )
+        )
+        exists = res.scalar_one_or_none()
+        if exists:
+            await message.answer("Вы уже участник этой семьи.")
+            return
+
+        session.add(FamilyMember(family_id=fam.id, user_id=user.id, role="member"))
+        await session.commit()
+
+    await message.answer(f"✅ Вы присоединились к семье: <b>{fam.name or fam.id}</b>")
+    # покажем меню семьи
+    await family_menu(message)
+
+
+@router.callback_query(F.data == "fam_leave")
+async def fam_leave(cb: types.CallbackQuery):
+    async for session in get_session():
+        user = await _get_or_create_user(session, cb.from_user)
+        fam = await _get_user_family(session, user.id)
+        if not fam:
+            await cb.answer()
+            await cb.message.answer("Вы не состоите в семье.")
+            return
+
+        # удаляем членство
+        res = await session.execute(
+            select(FamilyMember)
+            .where(
+                FamilyMember.family_id == fam.id,
+                FamilyMember.user_id == user.id,
+            )
+        )
+        m = res.scalar_one_or_none()
+        if m:
+            await session.delete(m)
+            await session.commit()
+
+    await cb.answer("Вы вышли из семьи")
+    await family_menu(cb.message)
