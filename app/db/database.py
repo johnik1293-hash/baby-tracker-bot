@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import os
-from typing import AsyncIterator
+import logging
+from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -10,60 +11,77 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import declarative_base
 
-from app.db.models import Base
+log = logging.getLogger(__name__)
 
+# --- URL БД ---------------------------------------------------------------
 
-def _normalize_db_url(url: str) -> str:
-    """
-    Приводим URL Postgres к async-драйверу:
-      postgres://...      -> postgresql+asyncpg://...
-      postgresql://...    -> postgresql+asyncpg://...
-    SQLite оставляем как есть.
-    """
-    if not url:
-        return ""
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
-    low = url.lower()
-    if low.startswith("postgres://"):
-        return "postgresql+asyncpg://" + url.split("://", 1)[1]
-    if low.startswith("postgresql://") and "+asyncpg" not in low:
-        return "postgresql+asyncpg://" + url.split("://", 1)[1]
-    return url
+# Render часто даёт postgres URL как postgresql://...
+# Для async-движка нужно postgresql+asyncpg://
+if DATABASE_URL and DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-
-# 1) Читаем DATABASE_URL
-DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
-
-# Если не задан — используем локальный SQLite (файл рядом с проектом)
+# Локальный fallback (если вдруг нет переменной окружения)
 if not DATABASE_URL:
-    DATABASE_URL = "sqlite+aiosqlite:///./baby_tracker.db"
+    DATABASE_URL = "sqlite+aiosqlite:///./app.db"
+    log.warning("DATABASE_URL is not set; using local SQLite fallback: %s", DATABASE_URL)
 
-# Принудительно переводим Postgres в asyncpg
-DATABASE_URL = _normalize_db_url(DATABASE_URL)
+# --- Engine & sessionmaker -----------------------------------------------
 
-# 2) Создаём async engine
 async_engine: AsyncEngine = create_async_engine(
     DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
 )
 
-# 3) Фабрика асинхронных сессий
 AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     bind=async_engine,
     expire_on_commit=False,
+    class_=AsyncSession,
 )
 
+# Базовый класс моделей
+Base = declarative_base()
 
-# 4) DI-зависимость/утилита для FastAPI/хендлеров
-async def get_session() -> AsyncIterator[AsyncSession]:
-    async with AsyncSessionLocal() as session:
+
+# --- Сессия как ASYNC CONTEXT MANAGER ------------------------------------
+
+@asynccontextmanager
+async def get_session() -> AsyncSession:
+    """
+    Правильный async context manager:
+        async with get_session() as session:
+            ...
+    """
+    session: AsyncSession = AsyncSessionLocal()
+    try:
         yield session
+        # Коммит на совести вызывающего кода (там, где нужны записи)
+    except Exception:
+        # В случае ошибки откатываем транзакцию,
+        # чтобы не оставлять сессию в грязном состоянии.
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        await session.close()
 
 
-# 5) Инициализация схемы БД (создание таблиц)
+# --- Инициализация схемы --------------------------------------------------
+
 async def init_db() -> None:
-    """Создать все таблицы по моделям (idempotent)."""
+    """
+    Создаёт таблицы по Base.metadata (idempotent).
+    Вызовите на старте приложения.
+    """
+    # Локальный импорт, чтобы избежать циклических зависимостей:
+    from app.db import models  # noqa: F401
+
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    log.info("DB schema is ready.")
