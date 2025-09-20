@@ -1,123 +1,160 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import asyncio
+from datetime import datetime, timedelta
+from typing import List, Tuple, Any
 
 from aiogram import Router, F, types
-from sqlalchemy import select
-from sqlalchemy.orm import joinedload
+from sqlalchemy import select, desc
 
 from app.db.database import get_session
-from app.db.models import User, Baby
+from app.db.models import User  # точно есть
 
-# Попытка импортировать универсальный журнал, если он у тебя есть
+# Модели событий могут отличаться у вас по именам — пробуем безопасно импортировать
 try:
-    from app.db.models import CareLog
-    HAS_CARELOG = True
+    from app.db.models import Feeding  # fields: id, baby_id, time, amount, side?, created_at?
 except Exception:
-    HAS_CARELOG = False
-
-# Попытка резервных моделей
-try:
-    from app.db.models import Feeding
-except Exception:
-    Feeding = None
+    Feeding = None  # type: ignore
 
 try:
-    from app.db.models import Sleep
+    from app.db.models import Sleep  # fields: id, baby_id, start_time, end_time, quality?, created_at?
 except Exception:
-    Sleep = None
+    Sleep = None  # type: ignore
 
-router = Router(name="calendar")
+try:
+    from app.db.models import DiaperChange  # fields: id, baby_id, time, type, created_at?
+except Exception:
+    DiaperChange = None  # type: ignore
+
+try:
+    from app.db.models import Bathing  # fields: id, baby_id, time, created_at?
+except Exception:
+    Bathing = None  # type: ignore
+
+router = Router()
+
+
+def _fmt_dt(dt: datetime) -> str:
+    return dt.strftime("%d.%m %H:%M")
+
+
+async def _load_user(tg_id: int) -> User | None:
+    async with get_session() as session:
+        res = await session.execute(select(User).where(User.telegram_id == tg_id).limit(1))
+        return res.scalar_one_or_none()
+
+
+async def _fetch_feedings(session, family_id: int, since: datetime, limit: int = 20) -> List[Tuple[datetime, str]]:
+    if not Feeding:
+        return []
+    q = (
+        select(Feeding)
+        .where(Feeding.family_id == family_id, Feeding.time >= since)
+        .order_by(desc(Feeding.time))
+        .limit(limit)
+    )
+    res = await session.execute(q)
+    items = res.scalars().all()
+    out: List[Tuple[datetime, str]] = []
+    for x in items:
+        amount = getattr(x, "amount", None)
+        msg = f"🍼 Кормление — {amount} мл" if amount else "🍼 Кормление"
+        out.append((x.time, msg))
+    return out
+
+
+async def _fetch_sleep(session, family_id: int, since: datetime, limit: int = 20) -> List[Tuple[datetime, str]]:
+    if not Sleep:
+        return []
+    q = (
+        select(Sleep)
+        .where(Sleep.family_id == family_id, Sleep.start_time >= since)
+        .order_by(desc(Sleep.start_time))
+        .limit(limit)
+    )
+    res = await session.execute(q)
+    items = res.scalars().all()
+    out: List[Tuple[datetime, str]] = []
+    for x in items:
+        start = getattr(x, "start_time", None)
+        end = getattr(x, "end_time", None)
+        dur_txt = ""
+        if start and end and isinstance(start, datetime) and isinstance(end, datetime):
+            mins = int((end - start).total_seconds() // 60)
+            dur_txt = f" ~ {mins} мин"
+        out.append((start or getattr(x, "created_at", datetime.utcnow()), f"😴 Сон{dur_txt}"))
+    return out
+
+
+async def _fetch_diapers(session, family_id: int, since: datetime, limit: int = 20) -> List[Tuple[datetime, str]]:
+    if not DiaperChange:
+        return []
+    q = (
+        select(DiaperChange)
+        .where(DiaperChange.family_id == family_id, DiaperChange.time >= since)
+        .order_by(desc(DiaperChange.time))
+        .limit(limit)
+    )
+    res = await session.execute(q)
+    items = res.scalars().all()
+    out: List[Tuple[datetime, str]] = []
+    for x in items:
+        t = getattr(x, "type", None)
+        kind = f" — {t}" if t else ""
+        out.append((x.time, f"🧷 Подгузник{kind}"))
+    return out
+
+
+async def _fetch_bathing(session, family_id: int, since: datetime, limit: int = 20) -> List[Tuple[datetime, str]]:
+    if not Bathing:
+        return []
+    q = (
+        select(Bathing)
+        .where(Bathing.family_id == family_id, Bathing.time >= since)
+        .order_by(desc(Bathing.time))
+        .limit(limit)
+    )
+    res = await session.execute(q)
+    items = res.scalars().all()
+    out: List[Tuple[datetime, str]] = []
+    for x in items:
+        out.append((x.time, "🛁 Купание"))
+    return out
+
+
+async def _collect_events(family_id: int) -> List[Tuple[datetime, str]]:
+    since = datetime.utcnow() - timedelta(days=7)  # последние 7 дней
+    async with get_session() as session:
+        results = await asyncio.gather(
+            _fetch_feedings(session, family_id, since),
+            _fetch_sleep(session, family_id, since),
+            _fetch_diapers(session, family_id, since),
+            _fetch_bathing(session, family_id, since),
+            return_exceptions=False,
+        )
+    events: List[Tuple[datetime, str]] = []
+    for chunk in results:
+        events.extend(chunk)
+    # Сортировка по убыванию времени
+    events.sort(key=lambda x: x[0], reverse=True)
+    # ограничим до 20 последних
+    return events[:20]
+
 
 @router.message(F.text.in_({"📅 Календарь", "Календарь"}))
-async def calendar_last(message: types.Message):
-    tg_id = message.from_user.id
-    now = datetime.now(timezone.utc)
-    since = now - timedelta(days=1)
+async def calendar_last(message: types.Message) -> None:
+    user = await _load_user(message.from_user.id)
+    if not user:
+        await message.answer("Нужно пройти /start, чтобы открыть календарь.")
+        return
+    if not getattr(user, "family_id", None):
+        await message.answer("Сначала создайте семью в меню «👨‍👩‍👧 Семья», чтобы видеть общий календарь.")
+        return
 
-    async for session in get_session():
-        # юзер
-        u_res = await session.execute(select(User).where(User.telegram_id == tg_id))
-        user = u_res.scalar_one_or_none()
-        if not user:
-            await message.answer("Пока нет данных. Сначала начните пользоваться ботом 😊")
-            return
+    events = await _collect_events(user.family_id)
+    if not events:
+        await message.answer("Пока событий нет за последние 7 дней.")
+        return
 
-        lines = [f"📅 <b>Последние события за 24 часа</b>:"]
-        events = []
-
-        if HAS_CARELOG:
-            # Берём журнал — за сутки
-            q = (
-                select(CareLog)
-                .where(CareLog.at >= since)
-                .options(joinedload(CareLog.baby))
-                .order_by(CareLog.at.desc())
-                .limit(25)
-            )
-            res = await session.execute(q)
-            for row in res.scalars():
-                baby_name = (row.baby.name if row.baby else "Без имени")
-                when = row.at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
-                what = row.action  # например: feeding/sleep/bath/etc
-                extra = []
-                if getattr(row, "amount_ml", None):
-                    extra.append(f"{row.amount_ml} мл")
-                if getattr(row, "duration_min", None):
-                    extra.append(f"{row.duration_min} мин")
-                if getattr(row, "side", None):
-                    extra.append(f"сторона: {row.side}")
-                if getattr(row, "note", None):
-                    extra.append(row.note)
-
-                events.append((row.at, f"• {when} — {baby_name}: {what}" + (f" ({', '.join(extra)})" if extra else "")))
-        else:
-            # Резерв: склеиваем Feeding/Sleep если они существуют
-            if Feeding is not None:
-                qf = (
-                    select(Feeding)
-                    .where(Feeding.started_at >= since)
-                    .options(joinedload(Feeding.baby))
-                    .order_by(Feeding.started_at.desc())
-                    .limit(25)
-                )
-                rf = await session.execute(qf)
-                for f in rf.scalars():
-                    baby_name = (f.baby.name if f.baby else "Без имени")
-                    when = f.started_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
-                    extra = []
-                    if getattr(f, "amount_ml", None):
-                        extra.append(f"{f.amount_ml} мл")
-                    if getattr(f, "side", None):
-                        extra.append(f"сторона: {f.side}")
-                    events.append((f.started_at, f"• {when} — {baby_name}: кормление" + (f" ({', '.join(extra)})" if extra else "")))
-
-            if Sleep is not None:
-                qs = (
-                    select(Sleep)
-                    .where(Sleep.started_at >= since)
-                    .options(joinedload(Sleep.baby))
-                    .order_by(Sleep.started_at.desc())
-                    .limit(25)
-                )
-                rs = await session.execute(qs)
-                for s in rs.scalars():
-                    baby_name = (s.baby.name if s.baby else "Без имени")
-                    when = s.started_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
-                    duration = ""
-                    if getattr(s, "ended_at", None):
-                        delta = (s.ended_at - s.started_at)
-                        mins = max(1, int(delta.total_seconds() // 60))
-                        duration = f" ({mins} мин)"
-                    events.append((s.started_at, f"• {when} — {baby_name}: сон{duration}"))
-
-        # вывод
-        if not events:
-            await message.answer("Пока нет событий за последние 24 часа.")
-            return
-
-        # сортировка по времени убыв.
-        events.sort(key=lambda x: x[0], reverse=True)
-        # только текст
-        text = "\n".join([lines[0]] + [e[1] for e in events[:25]])
-        await message.answer(text, parse_mode="HTML")
+    lines = [f"{_fmt_dt(ts)} — {text}" for ts, text in events]
+    await message.answer("Последние события:\n\n" + "\n".join(lines))
