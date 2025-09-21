@@ -9,12 +9,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 
 from app.db.database import AsyncSessionLocal
-from app.db.models import User, Baby  # Baby может называться Child в вашей модели — при необходимости замените
+from app.db.models import User, Baby  # если у вас модель называется Child — замените на Child
 
 router = Router(name=__name__)
 
-
-# ==== ВСПОМОГАТЕЛЬНОЕ ====
 
 async def _ensure_user(tg_id: int) -> User:
     async with AsyncSessionLocal() as session:
@@ -38,26 +36,16 @@ def _children_menu_kb(has_kids: bool) -> InlineKeyboardBuilder:
     return kb
 
 
-# ==== ХЕНДЛЕРЫ ====
-
 @router.message(F.text.in_({"👶 Профиль ребёнка", "Профиль ребёнка"}))
 async def children_entry(message: Message, state: FSMContext) -> None:
-    """Вход в раздел «Профиль ребёнка» из главного меню."""
     user = await _ensure_user(message.from_user.id)
 
-    # Пытаемся загрузить детей пользователя. Если поле в модели другое —
-    # просто не упадём и покажем заглушку.
-    babies = []
-    try:
-        async with AsyncSessionLocal() as session:
-            # Если у вас связь через family_id — замените условие на Baby.family_id == user.family_id
-            babies = (
-                await session.execute(
-                    select(Baby).where(Baby.user_id == user.id).order_by(Baby.id.desc())
-                )
-            ).scalars().all()
-    except Exception:
-        babies = []
+    # Загружаем детей пользователя (при другой схеме поменяйте условие)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Baby).where(Baby.user_id == user.id).order_by(Baby.id.desc())
+        )
+        babies = result.scalars().all()
 
     if babies:
         lines = ["Ваши дети:"]
@@ -75,23 +63,20 @@ async def children_entry(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "child:back")
 async def child_back(callback: CallbackQuery, state: FSMContext) -> None:
-    """Кнопка «Назад» из раздела детей — просто возвращаем текстово."""
     await callback.message.edit_text("Главное меню. Выберите действие.")
     await callback.answer()
 
 
 @router.callback_query(F.data == "child:add")
 async def child_add(callback: CallbackQuery, state: FSMContext) -> None:
-    """Заглушка добавления ребёнка (форму добавим позже)."""
     await callback.answer()
     await callback.message.answer(
-        "Добавление ребёнка пока в разработке. Сообщите имя и дату рождения, и я сохраню это в следующем обновлении."
+        "Добавление ребёнка пока в разработке. Напишите имя и дату рождения — добавим это в следующем обновлении."
     )
 
 
 @router.callback_query(F.data == "child:edit")
 async def child_edit(callback: CallbackQuery, state: FSMContext) -> None:
-    """Заглушка редактирования ребёнка."""
     await callback.answer()
     await callback.message.answer(
         "Редактирование профиля ребёнка пока в разработке. Скоро добавим выбор ребёнка и поля для изменения."

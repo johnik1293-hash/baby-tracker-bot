@@ -1,28 +1,32 @@
 # app/bot/handlers/calendar.py
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
 from aiogram import Router, F
 from aiogram.types import Message
+from sqlalchemy import select, desc
 
-from sqlalchemy import select
 from app.db.database import AsyncSessionLocal
-from app.db.models import User, Feeding, Sleep, CareLog  # подставьте ваши реальные модели
+from app.db.models import User  # импортируем только то, что точно есть
 
 router = Router(name=__name__)
 
-def _fmt_dt(dt: datetime) -> str:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%d.%m %H:%M")
+
+# Попытка импортировать таблицу событий, название может отличаться в вашем проекте.
+# Поменяйте при необходимости на вашу реальную модель (например, Event, Log, Activity).
+try:
+    from app.db.models import CareLog as EventModel  # noqa: F401
+except Exception:
+    EventModel = None  # fallback — просто скажем, что событий нет
+
 
 @router.message(F.text.in_({"📅 Календарь", "Календарь"}))
 async def calendar_last(message: Message) -> None:
-    """Показываем события за последние 24 часа по текущей семье/пользователю."""
+    """Показывает последние события пользователя (или семьи), если таблица событий есть."""
+    if EventModel is None:
+        await message.answer("Календарь пока недоступен: нет таблицы событий (CareLog).")
+        return
+
     tg_id = message.from_user.id
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
-    since = now - timedelta(hours=24)
 
     async with AsyncSessionLocal() as session:
         user = await session.scalar(select(User).where(User.telegram_id == tg_id))
@@ -32,67 +36,36 @@ async def calendar_last(message: Message) -> None:
             await session.commit()
             await session.refresh(user)
 
-        # Если есть семьи — фильтруйте по family_id; иначе по user_id
-        # Ниже примеры выборок; подстройте под ваши реальные поля:
+        # Под ваши поля: попробуем 1) по family_id, если он есть, 2) по user_id, иначе ничего.
+        q = None
+        if hasattr(EventModel, "family_id") and getattr(user, "family_id", None):
+            q = select(EventModel).where(
+                EventModel.family_id == user.family_id
+            ).order_by(desc(getattr(EventModel, "created_at", "id")))
+        elif hasattr(EventModel, "user_id"):
+            q = select(EventModel).where(
+                EventModel.user_id == user.id
+            ).order_by(desc(getattr(EventModel, "created_at", "id")))
 
-        feedings = []
-        sleeps = []
-        cares = []
+        if q is None:
+            await message.answer("Календарь: не удалось сопоставить поля модели событий (нужен family_id или user_id).")
+            return
 
-        try:
-            feedings = (await session.execute(
-                select(Feeding)
-                .where(Feeding.user_id == user.id)
-                .where(Feeding.created_at >= since)
-                .order_by(Feeding.created_at.desc())
-                .limit(10)
-            )).scalars().all()
-        except Exception:
-            pass
+        result = await session.execute(q.limit(10))
+        events = result.scalars().all()
 
-        try:
-            sleeps = (await session.execute(
-                select(Sleep)
-                .where(Sleep.user_id == user.id)
-                .where(Sleep.start_at >= since)
-                .order_by(Sleep.start_at.desc())
-                .limit(10)
-            )).scalars().all()
-        except Exception:
-            pass
+    if not events:
+        await message.answer("Событий пока нет. Добавьте запись, и она появится в календаре.")
+        return
 
-        try:
-            cares = (await session.execute(
-                select(CareLog)
-                .where(CareLog.user_id == user.id)
-                .where(CareLog.created_at >= since)
-                .order_by(CareLog.created_at.desc())
-                .limit(10)
-            )).scalars().all()
-        except Exception:
-            pass
-
-    # Формируем ответ
-    lines = ["Последние события (24ч):"]
-    if feedings:
-        lines.append("\n🍽 Кормления:")
-        for f in feedings:
-            lines.append(f"• {_fmt_dt(f.created_at)} — {getattr(f, 'amount_ml', '')} мл".strip())
-    if sleeps:
-        lines.append("\n😴 Сон:")
-        for s in sleeps:
-            end = getattr(s, "end_at", None)
-            if end:
-                lines.append(f"• {_fmt_dt(s.start_at)} → {_fmt_dt(end)}")
-            else:
-                lines.append(f"• {_fmt_dt(s.start_at)} → … (ещё спит)")
-    if cares:
-        lines.append("\n🧷 Уход:")
-        for c in cares:
-            typ = getattr(c, "type", "")
-            lines.append(f"• {_fmt_dt(c.created_at)} — {typ}")
-
-    if len(lines) == 1:
-        lines.append("Пока нет записей за последние 24 часа.")
+    lines = ["Последние события:"]
+    for e in events:
+        ts = getattr(e, "created_at", None) or getattr(e, "timestamp", None) or ""
+        title = getattr(e, "title", None) or getattr(e, "event_type", None) or "Событие"
+        detail = getattr(e, "note", None) or getattr(e, "description", None) or ""
+        if detail:
+            lines.append(f"• {title} — {detail} {f'({ts})' if ts else ''}")
+        else:
+            lines.append(f"• {title} {f'({ts})' if ts else ''}")
 
     await message.answer("\n".join(lines))
