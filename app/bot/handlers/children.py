@@ -8,17 +8,19 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sqlalchemy import select
 
-from app.db.database import AsyncSessionLocal
-from app.db.models import User, Baby  # если у вас модель называется Child — замените на Child
+# Вариант 1: используем ваш контекст-менеджер get_session()
+from app.db.database import get_session
+from app.db.models import User, Baby  # замените Baby на вашу модель Child, если нужно
 
 router = Router(name=__name__)
 
 
 async def _ensure_user(tg_id: int) -> User:
-    async with AsyncSessionLocal() as session:
+    async with get_session() as session:
         user = await session.scalar(select(User).where(User.telegram_id == tg_id))
         if user:
             return user
+
         user = User(telegram_id=tg_id)
         session.add(user)
         await session.commit()
@@ -40,8 +42,7 @@ def _children_menu_kb(has_kids: bool) -> InlineKeyboardBuilder:
 async def children_entry(message: Message, state: FSMContext) -> None:
     user = await _ensure_user(message.from_user.id)
 
-    # Загружаем детей пользователя (при другой схеме поменяйте условие)
-    async with AsyncSessionLocal() as session:
+    async with get_session() as session:
         result = await session.execute(
             select(Baby).where(Baby.user_id == user.id).order_by(Baby.id.desc())
         )
